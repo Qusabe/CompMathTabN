@@ -8,6 +8,12 @@ from typing import List
 import matplotlib.pyplot as plt
 import seaborn as sns
 from datetime import datetime
+from sympy import Matrix, symbols, N, latex
+import pandas as pd
+import sympy as sp
+import json
+from sympy import latex, Matrix
+from typing import Callable, Tuple, Optional
 
 # Инициализация FastAPI приложения
 app = FastAPI(
@@ -71,89 +77,272 @@ async def process_exl2word(file: UploadFile = File(...)):
     pass
 
 
-#Преобразовать формат репорта в соответствии с результатами функции преобразования
-def generate_markdown_report(df: pd.DataFrame) -> str:
+# Формула преобразования координат из начальной системы координат в конечную систему
+def transform_coordinates(sk1, sk2, parameters_path, df=None, save_path=None):
+  if sk1 == "СК-95" and sk2 == "СК-42":
+        df_temp = transform_coordinates("СК-95", "ПЗ-90.11", parameters_path, df=df)
+        df_result = transform_coordinates("ПЗ-90.11", "СК-42", parameters_path, df=df_temp, save_path=save_path)
+        return df_result
+  ΔX, ΔY, ΔZ, ωx, ωy, ωz, m = symbols('ΔX ΔY ΔZ ωx ωy ωz m')
+  X, Y, Z = symbols('X, Y, Z')
+
+  formula = (1 + m) * Matrix([[1, ωz, -ωy], [-ωz, 1, ωx], [ωy, -ωx, 1]]) @ Matrix([[X], [Y], [Z]]) + Matrix([[ΔX], [ΔY], [ΔZ]])
+
+  with open (parameters_path, 'r', encoding='utf-8') as f:
+    parameters = json.load(f)
+
+  if sk1 not in parameters:
+    raise
+
+  param = parameters[sk1]
+  elements_const = {
+      ΔX: param["ΔX"],
+      ΔY: param["ΔY"],
+      ΔZ: param["ΔZ"],
+      ωx: param["ωx"],
+      ωy: param["ωy"],
+      ωz: param["ωz"],
+      m: param["m"] * 1e-6
+  }
+
+  transformed = []
+
+  for _, row in df.iterrows():
+    elements = {
+        **elements_const,
+        X: row["X"],
+        Y: row["Y"],
+        Z: row["Z"],
+    }
+
+    results_vector = formula.subs(elements).applyfunc(N)
+
+    transformed.append([
+        row["Name"],
+        float(results_vector[0]),
+        float(results_vector[1]),
+        float(results_vector[2]),
+    ])
+
+  df_result = pd.DataFrame(transformed, columns=["Name", "X", "Y", "Z"])
+
+  if save_path:
+    df_result.to_excel(save_path, index=False)
+
+  return df_result
+
+
+# Preparing for markdown to word transformation
+def union_eq(*args):
+  eq = '$$'
+  for i in range(len(args)):
+    flag = 1 if len(args[i]) == 1 else 0
+    eq += latex(args[i])
+    print(latex(args[i]))
+
+    if  (i != (len(args)-1)) and flag != 1 and (len(args[i+1]) != 1):
+      eq += "="
+
+  return eq + '$$'
+
+# Формирование отчёта о результатах вычислений в формате Маркдаун
+def generate_markdown_report(func: Callable):
+    def wrapper(*args, **kwargs):
+        original_df = args[0]
+        target_system = args[1]
+        params_file = args[2]
+
+        # Выполним преобразование координат
+        transformed_df, formulas, transformation_params = func(original_df, target_system, params_file)
+
+        # Определение символьных переменных
+        X, Y, Z = symbols('X Y Z')
+        delta_X, delta_Y, delta_Z = symbols('ΔX ΔY ΔZ')
+        omega_x, omega_y, omega_z = symbols('ωx ωy ωz')
+        m_sym = symbols('m')
+
+        # Матрицы для общей формулы
+        vec_B = Matrix([X, Y, Z]).subs({X: 'X_B', Y: 'Y_B', Z: 'Z_B'})
+        vec_A = Matrix([X, Y, Z]).subs({X: 'X_A', Y: 'Y_A', Z: 'Z_A'})
+        translation_vec = Matrix([delta_X, delta_Y, delta_Z])
+        rotation_matrix = Matrix([
+            [1, omega_z, -omega_y],
+            [-omega_z, 1, omega_x],
+            [omega_y, -omega_x, 1]
+        ])
+
+        general_formula_left = vec_B
+        general_formula_right = (1 + m_sym) * rotation_matrix * vec_A + translation_vec
+        general_formula = union_eq(general_formula_left, general_formula_right)
+
+        # Формула с подставленными параметрами
+        X_new, Y_new, Z_new = formulas if formulas else (0, 0, 0)
+        specific_formula = (
+            f"$$ X_{{r}} = {latex(X_new)}, $$ \n\n"
+            f"$$ Y_{{r}} = {latex(Y_new)}, $$ \n\n"
+            f"$$ Z_{{r}} = {latex(Z_new)} $$"
+        )
+
+        first_point = original_df.iloc[0]
+        point_subs = {X: first_point['X'], Y: first_point['Y'], Z: first_point['Z']}
+
+        # Подстановка параметров в формулу
+        X_new_with_params = X_new
+        Y_new_with_params = Y_new
+        Z_new_with_params = Z_new
+        # Подстановка координат точки
+        X_new_with_coords = X_new_with_params.subs(point_subs)
+        Y_new_with_coords = Y_new_with_params.subs(point_subs)
+        Z_new_with_coords = Z_new_with_params.subs(point_subs)
+
+        report_content = f"# Отчёт по преобразованию координат\n\n"
+        report_content += f"## Параметры ввода\n\n"
+        report_content += f"- **Исходная таблица данных**: {original_df.shape[0]} точек\n"
+        report_content += f"- **Начальная система координат**: ГСК-2011\n"
+        report_content += f"- **Конечная система координат**: {target_system}\n"
+        report_content += f"- **Параметры преобразования**:\n"
+        report_content += f"  - ΔX: {transformation_params['ΔX']}\n"
+        report_content += f"  - ΔY: {transformation_params['ΔY']}\n"
+        report_content += f"  - ΔZ: {transformation_params['ΔZ']}\n"
+        report_content += f"  - ωx: {transformation_params['ωx']:.10f}\n"
+        report_content += f"  - ωy: {transformation_params['ωy']:.10f}\n"
+        report_content += f"  - ωz: {transformation_params['ωz']:.10f}\n"
+        report_content += f"  - m: {transformation_params['m']:.10f}\n\n"
+
+        # Пункт 1: Общая формула
+        report_content += f"## 1: Общая формула преобразования\n\n"
+        report_content += f"{general_formula}\n\n"
+
+        # Пункт 2: Формула с подставленными параметрами
+        report_content += f"## 2: Общая формула с подставленными параметрами перехода\n\n"
+        report_content += f"{specific_formula}\n\n"
+
+        # Пункт 3: Пример последовательных преобразований для первой точки
+        report_content += f"## 3: Пример последовательных преобразований для первой точки\n\n"
+        report_content += f"Для точки {first_point['Name']} с начальными координатами:\n"
+        report_content += f"X = {first_point['X']}\n"
+        report_content += f"Y = {first_point['Y']}\n"
+        report_content += f"Z = {first_point['Z']}\n\n"
+        report_content += f"### Шаг 1: Общая формула\n\n"
+        report_content += f"{general_formula}\n\n"
+        report_content += f"### Шаг 2: Подстановка параметров перехода\n\n"
+        report_content += f"$$ X_{{r}} = {latex(X_new_with_params)} $$\n\n"
+        report_content += f"$$ Y_{{r}} = {latex(Y_new_with_params)} $$\n\n"
+        report_content += f"$$ Z_{{r}} = {latex(Z_new_with_params)} $$\n\n"
+        report_content += f"### Шаг 3: Подстановка начальных координат\n\n"
+        report_content += f"$$ X_{{r}} = {latex(X_new_with_coords)} $$\n\n"
+        report_content += f"$$ Y_{{r}} = {latex(Y_new_with_coords)} $$\n\n"
+        report_content += f"$$ Z_{{r}} = {latex(Z_new_with_coords)} $$\n\n"
+        report_content += f"### Шаг 4: Вычисленные конечные координаты\n\n"
+        first_transformed = transformed_df.iloc[0]
+        report_content += f"$$ X_{{r}} = {first_transformed['X']} $$\n"
+        report_content += f"$$ Y_{{r}} = {first_transformed['Y']} $$\n"
+        report_content += f"$$ Z_{{r}} = {first_transformed['Z']} $$\n\n"
+
+        # Пункт 4: Таблица и статистика
+        report_content += f"## 4: Таблица с координатами до и после преобразования и общая статистика\n\n"
+        report_content += f"### Таблица координат до и после преобразования\n\n"
+        report_content += "| Name | Начальная X | Начальная Y | Начальная Z | Конечная X | Конечная Y | Конечная Z |\n"
+        report_content += "| --- | --- | --- | --- | --- | --- | --- |\n"
+        for index, row in original_df.iterrows():
+            transformed_row = transformed_df[transformed_df['Name'] == row['Name']].iloc[0]
+            report_content += f"| {row['Name']} | {row['X']:.6f} | {row['Y']:.6f} | {row['Z']:.6f} | {transformed_row['X']:.6f} | {transformed_row['Y']:.6f} | {transformed_row['Z']:.6f} |\n"
+        report_content += f"\n### Общая статистика\n\n"
+        report_content += f"#### Средние значения до преобразования\n\n"
+        report_content += f"- X: {original_df['X'].mean():.6f}\n"
+        report_content += f"- Y: {original_df['Y'].mean():.6f}\n"
+        report_content += f"- Z: {original_df['Z'].mean():.6f}\n\n"
+        report_content += f"#### Средние значения после преобразования\n\n"
+        report_content += f"- X: {transformed_df['X'].mean():.6f}\n"
+        report_content += f"- Y: {transformed_df['Y'].mean():.6f}\n"
+        report_content += f"- Z: {transformed_df['Z'].mean():.6f}\n\n"
+
+        return report_content
+
+    return wrapper
+
+#ХЗ что, надо разбираться
+@generate_markdown_report
+def transform_coordinates(input_data: pd.DataFrame, target_system: str, params_file: str, save_to_file: Optional[str] = None) -> Tuple[pd.DataFrame, Tuple[sp.Expr, sp.Expr, sp.Expr], dict]:
     """
-    Генерирует отчет в формате Markdown на основе предоставленного DataFrame
+    Returns:
+    - Tuple containing (transformed DataFrame, transformation formulas, parameters)
     """
-    # Создаем заголовок отчета
-    report = f"# Отчет по анализу данных\n\n"
-    report += f"Дата создания: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+    # Чтение параметров перехода из JSON-файла
+    with open(params_file, 'r', encoding='utf-8') as f:
+        all_params = json.load(f)
 
-    # Основная информация о данных
-    report += f"## Общая информация\n\n"
-    report += f"- **Количество строк**: {df.shape[0]}\n"
-    report += f"- **Количество столбцов**: {df.shape[1]}\n"
-    report += f"- **Столбцы**: {', '.join(df.columns)}\n\n"
+    if target_system not in all_params:
+        raise ValueError(f"Параметры перехода для системы '{target_system}' не найдены в файле {params_file}.")
 
-    # Статистика по числовым столбцам
-    report += f"## Статистический анализ\n\n"
+    # Извлечение параметров для целевой системы
+    params = all_params[target_system]
 
-    # Проверяем наличие числовых столбцов
-    numeric_columns = df.select_dtypes(include=['number']).columns.tolist()
-    if numeric_columns:
-        report += f"### Числовые данные\n\n"
-        stats_df = df[numeric_columns].describe().transpose()
-        # Форматируем статистику в виде таблицы Markdown
-        stats_table = "| Столбец | Количество | Среднее | Ст. отклонение | Мин | 25% | 50% | 75% | Макс |\n"
-        stats_table += "| --- | --- | --- | --- | --- | --- | --- | --- | --- |\n"
+    # Извлечение параметров
+    required_keys = ['ΔX', 'ΔY', 'ΔZ', 'ωx', 'ωy', 'ωz', 'm']
+    for key in required_keys:
+        if key not in params:
+            raise KeyError(f"В файле {params_file} для системы {target_system} отсутствует параметр '{key}'.")
 
-        for column, row in stats_df.iterrows():
-            stats_table += f"| {column} | {row['count']:.0f} | {row['mean']:.2f} | {row['std']:.2f} | {row['min']:.2f} | {row['25%']:.2f} | {row['50%']:.2f} | {row['75%']:.2f} | {row['max']:.2f} |\n"
+    dx, dy, dz = params['ΔX'], params['ΔY'], params['ΔZ']
+    wx, wy, wz = params['ωx'], params['ωy'], params['ωz']
+    m = params['m'] * 1e-6  # Масштабный коэффициент в микрoradiанах
 
-        report += stats_table + "\n\n"
-
-    # Анализ категориальных данных
-    categorical_columns = df.select_dtypes(include=['object', 'category']).columns.tolist()
-    if categorical_columns:
-        report += f"### Категориальные данные\n\n"
-
-        for column in categorical_columns:
-            value_counts = df[column].value_counts().head(5)  # Топ-5 значений
-            report += f"#### {column}\n\n"
-
-            # Создаем таблицу с частотами значений
-            report += "| Значение | Количество | Процент |\n"
-            report += "| --- | --- | --- |\n"
-
-            for value, count in value_counts.items():
-                percentage = (count / len(df)) * 100
-                report += f"| {value} | {count} | {percentage:.2f}% |\n"
-
-            report += "\n"
-
-    # Анализ пропущенных значений
-    report += f"## Анализ пропущенных значений\n\n"
-    missing_values = df.isnull().sum()
-    if missing_values.sum() > 0:
-        report += "| Столбец | Пропущенные значения | Процент пропущенных |\n"
-        report += "| --- | --- | --- |\n"
-
-        for column, missing in missing_values.items():
-            if missing > 0:
-                percentage = (missing / len(df)) * 100
-                report += f"| {column} | {missing} | {percentage:.2f}% |\n"
-
-        report += "\n"
+    # Чтение данных
+    if isinstance(input_data, pd.DataFrame):
+        df = input_data.copy()
     else:
-        report += "Пропущенные значения отсутствуют.\n\n"
+        df = pd.read_csv(input_data)
 
-    # Заключение
-    report += "## Выводы\n\n"
-    report += "На основе анализа данных можно сделать следующие выводы:\n\n"
-    report += "1. Данные содержат информацию о " + str(df.shape[0]) + " записях с " + str(df.shape[1]) + " характеристиками.\n"
+    # Проверка наличия необходимых столбцов
+    required_columns = ['Name', 'X', 'Y', 'Z']
+    if not all(col in df.columns for col in required_columns):
+        raise ValueError("Входные данные должны содержать столбцы: Name, X, Y, Z")
 
-    if numeric_columns:
-        # Находим столбец с наибольшим средним значением
-        max_mean_column = df[numeric_columns].mean().idxmax()
-        max_mean_value = df[numeric_columns].mean().max()
-        report += f"2. Столбец '{max_mean_column}' имеет наибольшее среднее значение ({max_mean_value:.2f}).\n"
+    # Определение символьных переменных
+    ΔX, ΔY, ΔZ, ωx, ωy, ωz, m_sym = symbols('ΔX ΔY ΔZ ωx ωy ωz m')
+    X, Y, Z = symbols('X Y Z')
 
-    if missing_values.sum() > 0:
-        most_missing = missing_values.idxmax()
-        most_missing_count = missing_values.max()
-        report += f"3. Столбец '{most_missing}' имеет наибольшее количество пропущенных значений ({most_missing_count}).\n"
+    # Формула преобразования
+    formula = (1 + m_sym) * Matrix([[1, ωz, -ωy], [-ωz, 1, ωx], [ωy, -ωx, 1]]) @ Matrix([[X], [Y], [Z]]) + Matrix([[ΔX], [ΔY], [ΔZ]])
 
-    report += "\n"
+    # Подстановка константных параметров
+    elements_const = {
+        ΔX: dx,
+        ΔY: dy,
+        ΔZ: dz,
+        ωx: wx,
+        ωy: wy,
+        ωz: wz,
+        m_sym: m
+    }
 
-    return report
+    transformed = []
+
+    for _, row in df.iterrows():
+        elements = {
+            **elements_const,
+            X: row['X'],
+            Y: row['Y'],
+            Z: row['Z']
+        }
+        results_vector = formula.subs(elements).applyfunc(N)
+        transformed.append([
+            row['Name'],
+            float(results_vector[0]),
+            float(results_vector[1]),
+            float(results_vector[2])
+        ])
+
+    df_result = pd.DataFrame(transformed, columns=['Name', 'X', 'Y', 'Z'])
+
+    if save_to_file:
+        df_result.to_excel(save_to_file, index=False)
+
+    # Возвращаем формулу для отчета
+    X_new = formula[0].subs(elements_const)
+    Y_new = formula[1].subs(elements_const)
+    Z_new = formula[2].subs(elements_const)
+
+    return df_result, (X_new, Y_new, Z_new), params
+
