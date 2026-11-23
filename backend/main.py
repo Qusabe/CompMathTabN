@@ -292,7 +292,7 @@ def transform_coordinates(input_data: pd.DataFrame, target_system: str, params_f
     if isinstance(input_data, pd.DataFrame):
         df = input_data.copy()
     else:
-        df = pd.read_csv(input_data)
+        df = pd.read_excel(input_data) #CHANGE: поменял с чтения CSV на чтение Экселя
 
     # Проверка наличия необходимых столбцов
     required_columns = ['Name', 'X', 'Y', 'Z']
@@ -346,3 +346,10 @@ def transform_coordinates(input_data: pd.DataFrame, target_system: str, params_f
 
     return df_result, (X_new, Y_new, Z_new), params
 
+
+'''
+# Сохранение отчёта в файл Markdown
+with open('coordinate_transformation_report.md', 'w', encoding='utf-8') as f:
+    f.write(report)
+print("Отчёт успешно создан: coordinate_transformation_report.md")
+'''

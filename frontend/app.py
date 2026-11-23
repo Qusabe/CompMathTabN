@@ -78,7 +78,7 @@ def main():
 
 
             #ПОДОГНАТЬ под текущее задание
-            if st.button("Анализировать"):
+            if st.button("Преобразовать"):
                 with st.spinner("Обрабатываем данные..."):
                     markdown_report = process_excel(uploaded_file)
 
